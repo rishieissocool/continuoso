@@ -1,0 +1,48 @@
+# Edit this file to steer the autonomous loop.
+# The Planner scores gaps against these goals every iteration.
+
+product:
+  name: "target-app"
+  # One or two sentences. The vision the loop optimizes toward.
+  vision: >
+    A small command-line task manager with a local SQLite backend,
+    a REST API wrapper, and a minimal web UI. Must stay single-binary
+    deployable and fully covered by tests.
+
+# Ordered; higher = more important. Planner uses these as strategic_weight.
+priorities:
+  - id: core-cli
+    weight: 1.0
+    description: "CLI commands: add, list, complete, delete tasks."
+  - id: persistence
+    weight: 0.9
+    description: "SQLite persistence with migrations."
+  - id: rest-api
+    weight: 0.7
+    description: "FastAPI wrapper around the core logic."
+  - id: web-ui
+    weight: 0.5
+    description: "Minimal HTML/HTMX UI served from the API."
+  - id: observability
+    weight: 0.4
+    description: "Structured logging + basic metrics."
+
+# The loop will not touch these unless a priority depends on it.
+non_goals:
+  - "Distributed systems / multi-node deploys"
+  - "Auth / multi-user (v1)"
+
+# Hard requirements. Evaluator treats these as invariants.
+invariants:
+  - "All public functions must have type hints."
+  - "Test coverage must not decrease between iterations."
+  - "No change may break existing passing tests."
+  - "No files may exceed 500 LOC."
+
+# Language / stack hints — helps the Planner generate realistic plans.
+stack:
+  language: python
+  package_manager: pip
+  test_runner: pytest
+  lint: ruff
+  formatter: ruff

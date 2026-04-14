@@ -1,0 +1,21 @@
+# Paths the loop may NOT modify autonomously. Matches are glob patterns
+# relative to the workspace root. Changes touching these paths are queued
+# for human approval and the loop moves on.
+
+require_human_approval:
+  - ".github/workflows/**"
+  - ".gitlab-ci*"
+  - "Dockerfile"
+  - "docker-compose*.yml"
+  - "**/migrations/**"
+  - "**/auth/**"
+  - "**/secrets/**"
+  - ".env*"
+  - "pyproject.toml"      # dependency changes require approval
+  - "package.json"
+  - "requirements.txt"
+
+# Files the loop must never touch at all.
+forbidden:
+  - ".git/**"
+  - ".continuoso/**"

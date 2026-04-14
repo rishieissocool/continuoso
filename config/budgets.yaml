@@ -1,0 +1,22 @@
+# Hard caps. When a cap is hit, the loop skips that tier until the window rolls.
+# Costs are USD estimates; token counts are input+output combined.
+
+window_hours: 24
+
+tiers:
+  free:
+    max_tokens_per_day: 5000000
+    max_requests_per_minute: 20
+  cheap:
+    max_tokens_per_day: 2000000
+    max_usd_per_day: 5.00
+  heavy:
+    max_tokens_per_day: 500000
+    max_usd_per_day: 10.00
+
+# Per-iteration caps (enforced by Orchestrator).
+per_iteration:
+  max_files_changed: 8
+  max_loc_changed: 400
+  max_wall_seconds: 1800
+  max_subtask_attempts: 5

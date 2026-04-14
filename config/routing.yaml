@@ -1,0 +1,74 @@
+# Model routing. Each tier lists models in preferred order.
+# Router starts with the cheapest tier whose historical success for the
+# task_class is >= success_threshold, then escalates on failure.
+
+success_threshold: 0.8
+escalation_attempts: 2           # failures at a tier before escalating
+
+tiers:
+  # Free tier — best free models from openrouter.ai/collections/free-models.
+  # Prioritised by structured-output support and programming ranking.
+  free:
+    provider: openrouter
+    models:
+      - id: "openai/gpt-oss-120b:free"
+        context: 131000
+      - id: "nvidia/nemotron-3-super-120b-a12b:free"
+        context: 262000
+      - id: "openrouter/elephant:free"
+        context: 262000
+      - id: "google/gemma-4-31b-it:free"
+        context: 262000
+      - id: "minimax/minimax-m2.5:free"
+        context: 197000
+      - id: "meta-llama/llama-3.3-70b-instruct:free"
+        context: 66000
+
+  # Cheap paid — reliable, low cost.
+  cheap:
+    provider: openrouter
+    models:
+      - id: "google/gemini-2.5-flash"
+        context: 1000000
+      - id: "deepseek/deepseek-r1-0528"
+        context: 163000
+      - id: "openai/gpt-4o-mini"
+        context: 128000
+      - id: "anthropic/claude-haiku-4.5"
+        context: 200000
+
+  # Heavy — for planning, cross-file refactors, debugging. Prefer Claude Code CLI
+  # (uses the user's existing Claude Code session / auth), fall back to OpenRouter.
+  heavy:
+    provider: claude_code
+    models:
+      - id: "claude-sonnet-4-6"
+        context: 1000000
+      - id: "claude-opus-4-6"
+        context: 1000000
+    fallback:
+      provider: openrouter
+      models:
+        - id: "google/gemini-2.5-flash"
+          context: 1000000
+        - id: "openai/gpt-4o"
+          context: 128000
+        - id: "anthropic/claude-sonnet-4.6"
+          context: 1000000
+
+# Default tier for each task class. Router may escalate above the default.
+task_class_defaults:
+  observe_summary: free
+  reflect_gaps: free
+  plan_iteration: heavy          # planning is high-leverage; spend here
+  decompose_task: cheap
+  edit_single_file: cheap
+  edit_cross_file: heavy
+  author_tests: cheap
+  fix_failing_tests: heavy
+  refactor: heavy
+  generate_docs: free
+  commit_message: free
+  lint_fix: free
+  dependency_bump: cheap
+  security_review: heavy

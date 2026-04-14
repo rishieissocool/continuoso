@@ -54,10 +54,19 @@ def ensure_repo(workspace: Path) -> None:
         _run(["git", "commit", "--allow-empty", "-m", "chore: continuoso init"], workspace)
 
 
+def _snapshot_untracked(workspace: Path) -> None:
+    """Commit any new/modified files so the worktree starts from the real state."""
+    _run(["git", "add", "-A"], workspace)
+    r = _run(["git", "diff", "--cached", "--quiet"], workspace, check=False)
+    if r.returncode != 0:
+        _run(["git", "commit", "-m", "chore: snapshot workspace state"], workspace)
+
+
 @contextmanager
 def worktree(workspace: Path, iteration_id: int) -> Iterator[Path]:
     """Yield a Path to an ephemeral worktree. Caller decides merge/discard."""
     ensure_repo(workspace)
+    _snapshot_untracked(workspace)
     wt_root = workspace / ".continuoso" / "worktrees"
     wt_root.mkdir(parents=True, exist_ok=True)
     branch = f"cont/iter-{iteration_id}-{int(time.time())}"
@@ -87,11 +96,6 @@ def merge_worktree(workspace: Path, wt: Path, iteration_id: int, message: str) -
     """Squash-merge worktree branch into main, then remove the worktree."""
     branch = _branch_of(wt)
     _run(["git", "checkout", "main"], workspace)
-    # Stage any untracked files so they don't block the squash merge.
-    _run(["git", "add", "-A"], workspace)
-    r = _run(["git", "diff", "--cached", "--quiet"], workspace, check=False)
-    if r.returncode != 0:
-        _run(["git", "commit", "-m", "chore: snapshot before merge"], workspace)
     _run(["git", "merge", "--squash", branch], workspace)
     _run(["git", "commit", "-m", message], workspace)
     sha = _run(["git", "rev-parse", "HEAD"], workspace).stdout.strip()

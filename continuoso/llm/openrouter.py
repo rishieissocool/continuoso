@@ -82,9 +82,12 @@ class OpenRouterClient(LLMClient):
         url = f"{self.base_url}/chat/completions"
         start = time.monotonic()
         last_exc: Exception | None = None
+        cur_max = max_tokens
+        data: dict[str, Any] | None = None
 
-        # Simple retry with backoff for transient 5xx / rate limits.
-        for attempt in range(3):
+        # Retries: 402 insufficient credits → halve max_tokens; 429/5xx → backoff.
+        for attempt in range(12):
+            payload["max_tokens"] = cur_max
             try:
                 r = self.session.post(
                     url,
@@ -92,20 +95,38 @@ class OpenRouterClient(LLMClient):
                     json=payload,
                     timeout=self.timeout,
                 )
-                if r.status_code == 429 or 500 <= r.status_code < 600:
-                    time.sleep(2 ** attempt)
-                    last_exc = LLMError(f"HTTP {r.status_code}: {r.text[:200]}")
-                    continue
-                if r.status_code >= 400:
-                    raise LLMError(f"HTTP {r.status_code}: {r.text[:500]}")
-                data = r.json()
-                break
             except requests.RequestException as e:
                 last_exc = e
-                time.sleep(2 ** attempt)
-        else:
-            raise LLMError(f"OpenRouter failed after retries: {last_exc}")
+                time.sleep(min(2 ** (attempt % 4), 16))
+                continue
 
+            if r.status_code == 402:
+                low = r.text.lower()
+                if cur_max > 256 and (
+                    "credit" in low or "afford" in low or "balance" in low
+                ):
+                    cur_max = max(256, cur_max // 2)
+                    last_exc = LLMError(f"HTTP 402: {r.text[:400]}")
+                    time.sleep(0.25)
+                    continue
+                raise LLMError(f"HTTP 402: {r.text[:500]}")
+
+            if r.status_code == 429 or 500 <= r.status_code < 600:
+                time.sleep(min(2 ** (attempt % 4), 16))
+                last_exc = LLMError(f"HTTP {r.status_code}: {r.text[:200]}")
+                continue
+
+            if r.status_code >= 400:
+                raise LLMError(f"HTTP {r.status_code}: {r.text[:500]}")
+
+            data = r.json()
+            break
+        else:
+            raise LLMError(
+                f"OpenRouter failed after retries: {last_exc or 'unknown'}"
+            )
+
+        assert data is not None
         latency_ms = int((time.monotonic() - start) * 1000)
 
         # Guard against models that return 200 with a non-standard body

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Iterator
 
 from .config import RoutingConfig, BudgetsConfig, Tier
-from .llm import ClaudeCodeClient, LLMClient, OpenRouterClient
+from .llm import ClaudeCodeClient, LLMClient, OllamaClient, OpenRouterClient
 from .memory import Memory
 
 log = logging.getLogger(__name__)
@@ -42,12 +42,14 @@ class Router:
         memory: Memory,
         openrouter: OpenRouterClient | None,
         claude_code: ClaudeCodeClient | None,
+        ollama: OllamaClient | None = None,
     ) -> None:
         self.routing = routing
         self.budgets = budgets
         self.memory = memory
         self.openrouter = openrouter
         self.claude_code = claude_code
+        self.ollama = ollama
 
     # ---------- Public API ----------
     def iter_selections(
@@ -111,6 +113,8 @@ class Router:
         return False
 
     def _client_for(self, provider: str) -> LLMClient | None:
+        if provider == "ollama":
+            return self.ollama
         if provider == "openrouter":
             return self.openrouter
         if provider == "claude_code":

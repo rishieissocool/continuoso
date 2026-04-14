@@ -4,6 +4,8 @@
 window_hours: 24
 
 tiers:
+  local:
+    max_tokens_per_day: 10000000
   free:
     max_tokens_per_day: 5000000
     max_requests_per_minute: 20

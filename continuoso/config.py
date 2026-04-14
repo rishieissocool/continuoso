@@ -53,7 +53,7 @@ class RoutingConfig:
 
     @property
     def tier_order(self) -> list[str]:
-        order = ["free", "cheap", "heavy"]
+        order = ["local", "free", "cheap", "heavy"]
         return [t for t in order if t in self.tiers]
 
 
@@ -99,9 +99,14 @@ class EnvConfig:
     openrouter_title: str
     claude_code_bin: str
     log_level: str
+    ollama_enabled: bool
+    ollama_base_url: str
+    ollama_timeout: int
 
 
 def load_env() -> EnvConfig:
+    _oe = os.environ.get("OLLAMA_ENABLED", "1").lower()
+    ollama_enabled = _oe not in ("0", "false", "no", "off")
     return EnvConfig(
         openrouter_api_key=os.environ.get("OPENROUTER_API_KEY"),
         openrouter_base_url=os.environ.get(
@@ -113,6 +118,11 @@ def load_env() -> EnvConfig:
         openrouter_title=os.environ.get("OPENROUTER_TITLE", "continuoso"),
         claude_code_bin=os.environ.get("CLAUDE_CODE_BIN", "claude"),
         log_level=os.environ.get("CONTINUOSO_LOG_LEVEL", "INFO"),
+        ollama_enabled=ollama_enabled,
+        ollama_base_url=os.environ.get(
+            "OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1"
+        ),
+        ollama_timeout=int(os.environ.get("OLLAMA_TIMEOUT", "180")),
     )
 
 
@@ -149,6 +159,18 @@ def load_routing(project_dir: Path) -> RoutingConfig:
         tiers=tiers,
         task_class_defaults=raw["task_class_defaults"],
     )
+
+
+def _apply_ollama_model_override(routing: RoutingConfig) -> None:
+    """If OLLAMA_MODEL is set, use it for the `local` tier's first model."""
+    mid = os.environ.get("OLLAMA_MODEL", "").strip()
+    if not mid:
+        return
+    loc = routing.tiers.get("local")
+    if not loc or not loc.models:
+        return
+    ctx = loc.models[0].context
+    loc.models[0] = ModelSpec(id=mid, context=ctx)
 
 
 def load_budgets(project_dir: Path) -> BudgetsConfig:
@@ -218,10 +240,12 @@ class AppConfig:
         project_dir = project_dir.resolve()
         project_dir.mkdir(parents=True, exist_ok=True)
         (project_dir / STATE_DIRNAME).mkdir(exist_ok=True)
+        routing = load_routing(project_dir)
+        _apply_ollama_model_override(routing)
         return cls(
             project_dir=project_dir,
             env=load_env(),
-            routing=load_routing(project_dir),
+            routing=routing,
             budgets=load_budgets(project_dir),
             goals=load_goals(project_dir, goals_path),
             danger=load_dangerous_paths(project_dir),

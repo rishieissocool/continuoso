@@ -101,7 +101,7 @@ class Executor:
             system=SYSTEM_BASE,
             user=prompt,
             model=sel.model,
-            max_tokens=8000,
+            max_tokens=4096,
             temperature=0.1,
             json_mode=True,
             workdir=str(workdir),

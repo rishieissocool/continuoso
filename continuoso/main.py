@@ -79,7 +79,8 @@ def run(
     if not cfg.env.openrouter_api_key:
         console.print(
             "[yellow]warning:[/yellow] OPENROUTER_API_KEY not set — "
-            "only Claude Code CLI (heavy tier) will be usable"
+            "OpenRouter tiers (free/cheap/heavy paid) are disabled; "
+            "Ollama local + Claude Code CLI still work",
         )
 
     console.rule(f"[bold cyan]continuoso[/bold cyan] project={project}")

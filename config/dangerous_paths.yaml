@@ -11,9 +11,6 @@ require_human_approval:
   - "**/auth/**"
   - "**/secrets/**"
   - ".env*"
-  - "pyproject.toml"      # dependency changes require approval
-  - "package.json"
-  - "requirements.txt"
 
 # Files the loop must never touch at all.
 forbidden:

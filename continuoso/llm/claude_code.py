@@ -3,29 +3,96 @@
 Invokes the `claude` binary in non-interactive mode (`-p`) with JSON output,
 run inside a specified working directory. Uses the user's existing Claude Code
 auth, so no API key is needed here.
+
+Resolution order (especially important on Windows):
+  1. ``CLAUDE_CODE_BIN`` if it is an existing file path
+  2. ``shutil.which`` on the hint and on ``claude.cmd`` / ``claude.exe``
+  3. npm global shims under ``%APPDATA%\\npm`` and ``%LOCALAPPDATA%\\npm``
 """
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import time
+from pathlib import Path
 
 from .base import LLMClient, LLMError, LLMResponse
+
+
+def resolve_claude_executable(hint: str = "claude") -> str | None:
+    """Return a path to the Claude Code CLI, or None if not found."""
+    hint = (hint or "claude").strip() or "claude"
+
+    try:
+        p = Path(hint)
+        if p.is_file():
+            return str(p.resolve())
+    except OSError:
+        pass
+
+    names: list[str] = [hint]
+    if os.name == "nt":
+        for extra in ("claude.cmd", "claude.exe"):
+            if extra not in names:
+                names.append(extra)
+
+    for name in names:
+        w = shutil.which(name)
+        if w:
+            return w
+
+    # pipx / uv / standalone user installs (often missing from GUI/IDE PATH)
+    try:
+        local_bin = Path.home() / ".local" / "bin"
+        if local_bin.is_dir():
+            for name in ("claude.exe", "claude.cmd", "claude"):
+                cand = local_bin / name
+                if cand.is_file():
+                    return str(cand)
+    except OSError:
+        pass
+
+    if os.name == "nt":
+        for base in (os.environ.get("APPDATA"), os.environ.get("LOCALAPPDATA")):
+            if not base:
+                continue
+            for sub in ("npm/claude.cmd", "npm/claude.exe", "npm/claude"):
+                cand = Path(base) / sub
+                if cand.is_file():
+                    return str(cand)
+
+    return None
 
 
 class ClaudeCodeClient(LLMClient):
     provider = "claude_code"
 
     def __init__(self, bin_path: str = "claude", timeout: int = 900) -> None:
-        resolved = shutil.which(bin_path) or bin_path
-        self.bin = resolved
+        self._hint = bin_path
         self.timeout = timeout
+        self.bin = resolve_claude_executable(bin_path) or ""
 
     def available(self) -> bool:
-        return shutil.which(self.bin) is not None or (
-            self.bin and not self.bin.endswith("claude")
-        )
+        return bool(self.bin)
+
+    def _argv(self, prompt: str, model: str) -> list[str]:
+        tail = [
+            "-p",
+            prompt,
+            "--output-format",
+            "json",
+            "--model",
+            model,
+        ]
+        if not self.bin:
+            raise LLMError("Claude Code CLI not found on PATH")
+        # npm's claude.cmd must run via cmd.exe; CreateProcess on .cmd is unreliable.
+        if os.name == "nt" and self.bin.lower().endswith((".cmd", ".bat")):
+            comspec = os.environ.get("COMSPEC", "cmd.exe")
+            return [comspec, "/c", self.bin, *tail]
+        return [self.bin, *tail]
 
     def complete(
         self,
@@ -42,15 +109,7 @@ class ClaudeCodeClient(LLMClient):
             raise LLMError("Claude Code CLI not found on PATH")
 
         prompt = f"{system}\n\n---\n\n{user}"
-        cmd = [
-            self.bin,
-            "-p",
-            prompt,
-            "--output-format",
-            "json",
-            "--model",
-            model,
-        ]
+        cmd = self._argv(prompt, model)
 
         start = time.monotonic()
         try:

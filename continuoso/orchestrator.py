@@ -10,7 +10,7 @@ from pathlib import Path
 from .config import AppConfig
 from .evaluator import EvalReport, Evaluator
 from .executor import Executor
-from .llm import ClaudeCodeClient, OpenRouterClient
+from .llm import ClaudeCodeClient, OllamaClient, OpenRouterClient
 from .memory import Memory
 from .observer import Observer, Snapshot
 from .planner import Plan, Planner, Subtask
@@ -52,9 +52,25 @@ class Orchestrator:
             if cfg.env.openrouter_api_key
             else None
         )
+        self.ollama = (
+            OllamaClient(
+                base_url=cfg.env.ollama_base_url,
+                timeout=cfg.env.ollama_timeout,
+            )
+            if cfg.env.ollama_enabled
+            else None
+        )
+        if self.ollama:
+            log.info("Ollama (local): %s — set OLLAMA_ENABLED=0 to disable", cfg.env.ollama_base_url)
         self.claude_code = ClaudeCodeClient(bin_path=cfg.env.claude_code_bin)
-        if not self.claude_code.available():
-            log.warning("Claude Code CLI not found; heavy tier will use OpenRouter fallback")
+        if self.claude_code.available():
+            log.info("Claude Code CLI: %s", self.claude_code.bin)
+        else:
+            log.warning(
+                "Claude Code CLI not found — set CLAUDE_CODE_BIN to the full path "
+                "(Windows npm global is often Roaming/npm/claude.cmd); "
+                "heavy tier will use OpenRouter fallback",
+            )
             self.claude_code = None  # type: ignore
 
         self.router = Router(
@@ -63,6 +79,7 @@ class Orchestrator:
             memory=self.memory,
             openrouter=self.openrouter,
             claude_code=self.claude_code,
+            ollama=self.ollama,
         )
         self.safeguards = Safeguards(self.memory)
         self.observer = Observer(cfg.project_dir)

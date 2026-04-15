@@ -1,9 +1,11 @@
 """Evaluator — gates merges on tests, lint, invariants, and size caps."""
 from __future__ import annotations
 
+import importlib.util
 import logging
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -98,7 +100,7 @@ class Evaluator:
 
     # ----------------------------------------------------------------
     def _run_pytest(self, workdir: Path) -> tuple[bool, str]:
-        if shutil.which("pytest") is None:
+        if importlib.util.find_spec("pytest") is None:
             return True, "pytest not installed; skipped"
         has_tests = (
             (workdir / "tests").exists()
@@ -109,7 +111,7 @@ class Evaluator:
             return True, "no tests yet"
         try:
             r = subprocess.run(
-                ["pytest", "-q", "--tb=short", "--no-header"],
+                [sys.executable, "-m", "pytest", "-q", "--tb=short", "--no-header"],
                 cwd=workdir,
                 capture_output=True,
                 text=True,

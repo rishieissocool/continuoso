@@ -102,6 +102,8 @@ class EnvConfig:
     ollama_enabled: bool
     ollama_base_url: str
     ollama_timeout: int
+    snapshot_run_tests: bool
+    pytest_timeout: int
 
 
 def load_env() -> EnvConfig:
@@ -123,6 +125,11 @@ def load_env() -> EnvConfig:
             "OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1"
         ),
         ollama_timeout=int(os.environ.get("OLLAMA_TIMEOUT", "180")),
+        snapshot_run_tests=(
+            os.environ.get("CONTINUOSO_SNAPSHOT_TESTS", "1").lower()
+            not in ("0", "false", "no", "off")
+        ),
+        pytest_timeout=int(os.environ.get("CONTINUOSO_PYTEST_TIMEOUT", "300")),
     )
 
 

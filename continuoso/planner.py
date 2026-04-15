@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -58,11 +59,25 @@ class Planner:
             goals=json.dumps(self.cfg.goals.raw, indent=2),
             state=snapshot.to_json(),
         )
+        t0 = time.monotonic()
         resp, sel = self._call_with_fallback("reflect_gaps", prompt)
+        wall_ms = int((time.monotonic() - t0) * 1000)
         self._account(sel, resp, "reflect_gaps")
+        log.info(
+            "reflect_gaps: %s/%s — %dms wall, %d in / %d out tok",
+            sel.provider, sel.model, wall_ms,
+            resp.input_tokens, resp.output_tokens,
+        )
+        log.debug("reflect_gaps: raw model text (first 2k):\n%s", resp.text[:2000])
         data = _loads_robust(resp.text)
         gaps = data.get("gaps", []) if isinstance(data, dict) else []
-        return self._rank_gaps(gaps)
+        ranked = self._rank_gaps(gaps)
+        if ranked:
+            ids = ", ".join(str(g.get("id", "?")) for g in ranked[:8])
+            log.info("reflect_gaps: %d gaps (ids: %s%s)", len(ranked), ids, " …" if len(ranked) > 8 else "")
+        else:
+            log.info("reflect_gaps: %d gaps after ranking", len(ranked))
+        return ranked
 
     def plan(self, snapshot: Snapshot, gaps: list[dict]) -> Plan:
         prompt = PLAN_PROMPT.format(
@@ -71,8 +86,16 @@ class Planner:
             max_loc=self.cfg.budgets.max_loc_changed,
             max_files=self.cfg.budgets.max_files_changed,
         )
+        t0 = time.monotonic()
         resp, sel = self._call_with_fallback("plan_iteration", prompt)
+        wall_ms = int((time.monotonic() - t0) * 1000)
         self._account(sel, resp, "plan_iteration")
+        log.info(
+            "plan_iteration: %s/%s — %dms wall, %d in / %d out tok",
+            sel.provider, sel.model, wall_ms,
+            resp.input_tokens, resp.output_tokens,
+        )
+        log.debug("plan_iteration: raw model text (first 2k):\n%s", resp.text[:2000])
         data = _loads_robust(resp.text)
         if not isinstance(data, dict) or "subtasks" not in data:
             raise LLMError(f"planner returned invalid JSON: {resp.text[:300]}")
@@ -94,18 +117,28 @@ class Planner:
             if g.get("id") == chosen:
                 weight = float(g.get("_weight", 0.0))
                 break
-        return Plan(
-            iteration_goal=data.get("iteration_goal", ""),
+        goal = data.get("iteration_goal", "")
+        plan = Plan(
+            iteration_goal=goal,
             chosen_gap_id=chosen,
             subtasks=subtasks,
             gap_priority_weight=weight,
             raw=data,
         )
+        log.info(
+            "plan_iteration: gap=%s subtasks=%d goal=%r",
+            chosen, len(subtasks), (goal[:120] + "…") if len(goal) > 120 else goal,
+        )
+        return plan
 
     def _call_with_fallback(self, task_class: str, prompt: str):
         """Try each model the router yields until one succeeds."""
         last_err: Exception | None = None
         for sel in self.router.iter_selections(task_class):
+            log.info(
+                "%s: trying %s/%s (tier=%s)",
+                task_class, sel.provider, sel.model, sel.tier,
+            )
             try:
                 resp = _call(sel, prompt, json_mode=True)
                 return resp, sel

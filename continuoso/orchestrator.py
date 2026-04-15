@@ -118,11 +118,19 @@ class Orchestrator:
 
     # ------------------------------------------------------------------
     def run_iteration(self) -> IterationResult:
-        snap = self.observer.snapshot(run_tests=True)
+        log.info(
+            "iteration: workspace snapshot (tests=%s) …",
+            self.cfg.env.snapshot_run_tests,
+        )
+        snap = self.observer.snapshot(
+            run_tests=self.cfg.env.snapshot_run_tests,
+            pytest_timeout=self.cfg.env.pytest_timeout,
+        )
         iteration_id = self.memory.start_iteration(goal="(planning)")
         planner = Planner(self.cfg, self.router, self.memory, iteration_id)
 
         # 1. Reflect.
+        log.info("iteration: reflect_gaps (LLM) …")
         try:
             gaps = planner.reflect(snap)
         except Exception as e:
@@ -140,6 +148,7 @@ class Orchestrator:
             return IterationResult(iteration_id, "empty", 0.0, "", "no gaps")
 
         # 2. Plan.
+        log.info("iteration: plan_iteration (LLM) …")
         try:
             plan = planner.plan(snap, gaps)
         except Exception as e:

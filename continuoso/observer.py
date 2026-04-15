@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -53,15 +55,26 @@ class Observer:
     def __init__(self, workspace: Path) -> None:
         self.workspace = workspace
 
-    def snapshot(self, run_tests: bool = False) -> Snapshot:
+    def snapshot(
+        self,
+        run_tests: bool = False,
+        *,
+        pytest_timeout: int = 300,
+    ) -> Snapshot:
+        log.info("observer: scanning workspace %s …", self.workspace)
+        t0 = time.monotonic()
         files = self._walk()
         files.sort(key=lambda f: (-f["loc"], f["path"]))
         total_loc = sum(f["loc"] for f in files)
+        log.info(
+            "observer: indexed %d files, %d LOC (%.1fs)",
+            len(files), total_loc, time.monotonic() - t0,
+        )
 
         commits = self._git_log()
         test_ok, test_summary = (None, "")
         if run_tests:
-            test_ok, test_summary = self._run_pytest()
+            test_ok, test_summary = self._run_pytest(timeout=pytest_timeout)
 
         notes = ""
         if not files:
@@ -118,19 +131,42 @@ class Observer:
             log.debug("git log failed: %s", e)
         return []
 
-    def _run_pytest(self) -> tuple[bool, str]:
+    def _run_pytest(self, *, timeout: int = 300) -> tuple[bool, str]:
         if not (self.workspace / "tests").exists() and not list(
             self.workspace.glob("test_*.py")
         ):
+            log.info("observer: no pytest suite — skipping")
             return True, "no tests present (treated as pass)"
+        log.info(
+            "observer: running pytest (timeout %ds) — this can take a while…",
+            timeout,
+        )
+        t0 = time.monotonic()
         try:
+            # Use `python -m pytest` so Windows finds pytest without a Scripts\pytest.exe on PATH.
             r = subprocess.run(
-                ["pytest", "-q", "--tb=short"],
+                [sys.executable, "-m", "pytest", "-q", "--tb=short"],
                 cwd=self.workspace,
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=timeout,
             )
-            return r.returncode == 0, (r.stdout + "\n" + r.stderr).strip()
+            elapsed = time.monotonic() - t0
+            ok = r.returncode == 0
+            combined = (r.stdout + "\n" + r.stderr).strip()
+            log.info(
+                "observer: pytest finished in %.1fs (%s)",
+                elapsed, "pass" if ok else "fail",
+            )
+            if not ok and combined:
+                tail = combined[-4000:] if len(combined) > 4000 else combined
+                log.warning(
+                    "observer: pytest failure output (last %d chars):\n%s",
+                    len(tail), tail,
+                )
+            elif not ok:
+                log.warning("observer: pytest failed with no captured output (exit %d)", r.returncode)
+            return ok, combined
         except (OSError, subprocess.TimeoutExpired) as e:
+            log.warning("observer: pytest failed or timed out: %s", e)
             return False, f"pytest invocation failed: {e}"

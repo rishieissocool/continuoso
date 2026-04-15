@@ -1,93 +1,65 @@
-"""All system prompts in one place. Edit freely to retune behavior."""
+"""All system prompts in one place. Kept short to save input tokens."""
 from __future__ import annotations
 
-SYSTEM_BASE = """You are continuoso, an autonomous software engineer. You edit a real codebase inside a git worktree. Be precise. Prefer small incremental changes. Never break existing tests. Never invent file paths. If unsure, inspect before editing."""
+# One dense block — repeated every LLM call.
+SYSTEM_BASE = (
+    "continuoso: autonomous engineer on a git worktree. "
+    "Small steps; no invented paths; keep tests green. "
+    "If snapshot.test_ok is false, fix tests before features. "
+    "Return only JSON when the user prompt asks for JSON."
+)
 
-REFLECT_PROMPT = """Given this repository state and product goals, list concrete gaps between the current state and the goals. Return JSON:
+# Passed into REFLECT_PROMPT.format(task_classes=...)
+TASK_CLASSES = (
+    "edit_single_file,edit_cross_file,author_tests,fix_failing_tests,"
+    "refactor,generate_docs,dependency_bump"
+)
 
-{{
-  "gaps": [
-    {{
-      "id": "slug-kebab",
-      "title": "...",
-      "rationale": "why this matters",
-      "touches": ["likely file paths or modules"],
-      "task_class": "one of: edit_single_file, edit_cross_file, author_tests, fix_failing_tests, refactor, generate_docs, dependency_bump",
-      "est_loc": 50,
-      "priority_id": "matching id from goals.priorities"
-    }}
-  ]
-}}
 
-Goals:
-{goals}
+def format_session_focus(raw: str | None) -> str:
+    """Compact line for prompts; empty → token-saving placeholder."""
+    t = (raw or "").strip()
+    return t if t else "(none)"
 
-Repo state:
-{state}
 
-Return ONLY the JSON. No prose."""
+REFLECT_PROMPT = """Find gaps between goals and repo. JSON only.
 
-PLAN_PROMPT = """You are the Planner. Given gaps ranked by priority, pick the single best next iteration and decompose it into ordered subtasks.
+Schema: {{"gaps":[{{"id":"","title":"","rationale":"","touches":[],"task_class":"","est_loc":0,"priority_id":""}}]}}
+task_class: one of {task_classes}
 
-Rules:
-- Output 1 to 6 subtasks, each independently verifiable.
-- Each subtask must include acceptance_criteria the Evaluator can check mechanically.
-- If tests are needed, include a subtask that writes them BEFORE the implementation subtask.
-- Stay within {max_loc} lines of code total and {max_files} files total.
+Rules: If test_ok is false or test (pytest) shows failures, include ≥1 gap with task_class fix_failing_tests or author_tests among top items. Else correctness→tests→polish. Target repo only.
 
-Gaps (ranked):
-{gaps}
+Session focus:{session_focus}
+Prefer gaps matching focus; failing tests still win.
 
-Current repo summary:
-{state}
+Goals:{goals}
+State:{state}"""
 
-Return JSON:
-{{
-  "iteration_goal": "...",
-  "chosen_gap_id": "...",
-  "subtasks": [
-    {{
-      "id": "s1",
-      "task_class": "...",
-      "instruction": "precise imperative instruction for an engineer",
-      "files": ["paths that will likely be touched"],
-      "acceptance_criteria": ["bullet", "points"]
-    }}
-  ]
-}}
+PLAN_PROMPT = """One gap → 1–6 ordered subtasks. JSON only.
 
-Return ONLY the JSON."""
+Schema: {{"iteration_goal":"","chosen_gap_id":"","subtasks":[{{"id":"","task_class":"","instruction":"","files":[],"acceptance_criteria":[]}}]}}
 
-EXECUTE_PROMPT = """You are implementing a single subtask. Work directly on the files listed. Make the minimum change required. Do not refactor unrelated code. Do not add features not asked for.
+Rules: Mechanical acceptance_criteria. author_tests before/with code if tests missing; fix_failing_tests first if red. Cap ≤{max_loc} LOC, ≤{max_files} files.
 
-Subtask:
+Session focus:{session_focus}
+Align iteration_goal and subtasks with focus when tests allow.
+
+Gaps:{gaps}
+State:{state}"""
+
+EXECUTE_PROMPT = """One subtask; minimal diff; keep tests green.
+
+Session focus:{session_focus}
+
 {instruction}
-
-Files in scope:
-{files}
-
-Acceptance criteria:
-{criteria}
-
-Relevant current file contents:
+Files:{files}
+Criteria:{criteria}
 {file_contents}
 
-Return JSON with a file-by-file patch:
-{{
-  "changes": [
-    {{
-      "path": "relative/path.py",
-      "action": "create" | "modify" | "delete",
-      "content": "full new file contents (omit for delete)"
-    }}
-  ],
-  "notes": "one-line commit message"
-}}
+JSON: {{"changes":[{{"path":"","action":"create|modify|delete","content":""}}],"notes":""}}"""
 
-Return ONLY the JSON."""
-
-COMMIT_MSG_PROMPT = """Write a concise conventional-commit message (<=72 chars, lowercase type prefix like feat:/fix:/refactor:/test:/chore:) for this diff:
+COMMIT_MSG_PROMPT = """Conventional commit ≤72 chars (feat:/fix:/test:/chore: lowercase):
 
 {diff}
 
-Return only the commit message line."""
+One line only."""

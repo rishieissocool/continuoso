@@ -5,7 +5,6 @@ recent commits, LOC counts, and detected stack.
 """
 from __future__ import annotations
 
-import json
 import logging
 import subprocess
 import sys
@@ -13,16 +12,34 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .json_compact import dumps_llm
+
 log = logging.getLogger(__name__)
+
+# LLM snapshot caps (token budget)
+_MAX_SNAPSHOT_FILES = 96
+_MAX_TEST_CHARS = 1600
+_GIT_LOG_N = 8
 
 IGNORE_DIRS = {
     ".git", ".venv", "venv", "__pycache__", "node_modules", "dist", "build",
     ".pytest_cache", ".mypy_cache", ".ruff_cache", "htmlcov", ".idea", ".vscode",
+    ".continuoso",  # worktrees + sqlite — huge and irrelevant to the app
 }
 TEXT_EXT = {
     ".py", ".md", ".txt", ".yaml", ".yml", ".toml", ".cfg", ".ini",
     ".js", ".ts", ".tsx", ".jsx", ".html", ".css", ".json", ".sh",
 }
+
+
+def _truncate_test_tail(s: str, max_chars: int) -> str:
+    """Keep start + end of pytest output (failures often at the bottom)."""
+    s = s.strip()
+    if len(s) <= max_chars:
+        return s
+    head = max_chars // 2
+    tail = max(0, max_chars - head - 24)
+    return s[:head] + "\n...[truncated]...\n" + s[-tail:]
 
 
 @dataclass
@@ -36,19 +53,19 @@ class Snapshot:
     notes: str = ""
 
     def to_json(self) -> str:
-        return json.dumps(
-            {
-                "workspace": str(self.workspace),
-                "total_files": len(self.files),
-                "total_loc": self.total_loc,
-                "files": self.files[:200],   # cap context
-                "recent_commits": self.recent_commits,
-                "test_ok": self.test_ok,
-                "test_summary": self.test_summary[:2000],
-                "notes": self.notes,
-            },
-            indent=2,
-        )
+        """Compact JSON for prompts (no pretty-print; caps file list and pytest text)."""
+        ts = _truncate_test_tail(self.test_summary, _MAX_TEST_CHARS)
+        payload = {
+            "ws": str(self.workspace),
+            "files_n": len(self.files),
+            "loc": self.total_loc,
+            "files": self.files[:_MAX_SNAPSHOT_FILES],
+            "commits": self.recent_commits[:_GIT_LOG_N],
+            "test_ok": self.test_ok,
+            "test": ts,
+            "notes": self.notes,
+        }
+        return dumps_llm(payload)
 
 
 class Observer:
@@ -60,10 +77,11 @@ class Observer:
         run_tests: bool = False,
         *,
         pytest_timeout: int = 300,
+        max_files: int = 500,
     ) -> Snapshot:
         log.info("observer: scanning workspace %s …", self.workspace)
         t0 = time.monotonic()
-        files = self._walk()
+        files = self._walk(max_files=max_files)
         files.sort(key=lambda f: (-f["loc"], f["path"]))
         total_loc = sum(f["loc"] for f in files)
         log.info(
@@ -79,6 +97,11 @@ class Observer:
         notes = ""
         if not files:
             notes = "Empty or not-yet-initialized repo."
+        elif run_tests and test_ok is False:
+            notes = (
+                "PRIORITY: tests are failing — prefer gaps that fix failures "
+                "before adding unrelated features."
+            )
 
         return Snapshot(
             workspace=self.workspace,
@@ -90,11 +113,16 @@ class Observer:
             notes=notes,
         )
 
-    def _walk(self) -> list[dict]:
+    def _walk(self, *, max_files: int = 500) -> list[dict]:
         out: list[dict] = []
         if not self.workspace.exists():
             return out
+        truncated = False
+        unlimited = max_files <= 0
         for p in self.workspace.rglob("*"):
+            if not unlimited and len(out) >= max_files:
+                truncated = True
+                break
             if any(part in IGNORE_DIRS for part in p.parts):
                 continue
             if not p.is_file():
@@ -112,6 +140,11 @@ class Observer:
                     "ext": p.suffix,
                 }
             )
+        if truncated:
+            log.warning(
+                "observer: file index capped at %d files (CONTINUOSO_SNAPSHOT_MAX_FILES)",
+                max_files,
+            )
         return out
 
     def _git_log(self) -> list[str]:
@@ -119,7 +152,7 @@ class Observer:
             return []
         try:
             r = subprocess.run(
-                ["git", "log", "--oneline", "-n", "15"],
+                ["git", "log", "--oneline", "-n", str(_GIT_LOG_N)],
                 cwd=self.workspace,
                 capture_output=True,
                 text=True,

@@ -7,6 +7,9 @@ Each project keeps its own state in `<project>/.continuoso/`:
   dangerous_paths.yaml optional override
   memory.db            SQLite state (iterations, router stats, budgets)
   worktrees/           ephemeral git worktrees
+  logs/features.md     append-only list of merged features (all sessions)
+  logs/sessions/       one markdown file per `continuoso run` with that session's features
+  Session focus        optional theme for a run (CLI prompt, --focus, or CONTINUOSO_SESSION_FOCUS)
 
 Run `continuoso run /path/to/project` from anywhere.
 """
@@ -50,11 +53,13 @@ class RoutingConfig:
     escalation_attempts: int
     tiers: dict[str, Tier]
     task_class_defaults: dict[str, str]
+    # If set in routing.yaml, defines tier walk order (e.g. heavy first for Claude Code CLI).
+    explicit_tier_order: list[str] | None = None
 
     @property
     def tier_order(self) -> list[str]:
-        order = ["local", "free", "cheap", "heavy"]
-        return [t for t in order if t in self.tiers]
+        base = self.explicit_tier_order or ["local", "free", "cheap", "heavy"]
+        return [t for t in base if t in self.tiers]
 
 
 @dataclass
@@ -104,6 +109,10 @@ class EnvConfig:
     ollama_timeout: int
     snapshot_run_tests: bool
     pytest_timeout: int
+    iteration_delay_sec: float
+    snapshot_max_files: int
+    verbose_llm: bool
+    verbose_llm_chars: int
 
 
 def load_env() -> EnvConfig:
@@ -130,6 +139,19 @@ def load_env() -> EnvConfig:
             not in ("0", "false", "no", "off")
         ),
         pytest_timeout=int(os.environ.get("CONTINUOSO_PYTEST_TIMEOUT", "300")),
+        iteration_delay_sec=float(
+            os.environ.get("CONTINUOSO_ITERATION_DELAY_SEC", "5")
+        ),
+        snapshot_max_files=int(
+            os.environ.get("CONTINUOSO_SNAPSHOT_MAX_FILES", "500")
+        ),
+        verbose_llm=os.environ.get(
+            "CONTINUOSO_VERBOSE_LLM", "0"
+        ).lower()
+        in ("1", "true", "yes", "on"),
+        verbose_llm_chars=int(
+            os.environ.get("CONTINUOSO_VERBOSE_LLM_CHARS", "8000")
+        ),
     )
 
 
@@ -160,11 +182,19 @@ def load_routing(project_dir: Path) -> RoutingConfig:
             fallback_provider=fb_provider,
             fallback_models=fb_models,
         )
+    explicit = raw.get("tier_order")
+    if explicit is not None and not isinstance(explicit, list):
+        raise ValueError("routing.yaml: tier_order must be a list of tier names")
+    explicit_tier_order: list[str] | None = None
+    if explicit:
+        explicit_tier_order = [str(x) for x in explicit]
+
     return RoutingConfig(
         success_threshold=float(raw["success_threshold"]),
         escalation_attempts=int(raw["escalation_attempts"]),
         tiers=tiers,
         task_class_defaults=raw["task_class_defaults"],
+        explicit_tier_order=explicit_tier_order,
     )
 
 
@@ -225,6 +255,8 @@ class AppConfig:
     budgets: BudgetsConfig
     goals: GoalsConfig
     danger: DangerousPathsConfig
+    # Optional theme for this `continuoso run` (CLI prompt or CONTINUOSO_SESSION_FOCUS).
+    session_focus: str | None = None
 
     @property
     def state_dir(self) -> Path:
@@ -243,6 +275,8 @@ class AppConfig:
         cls,
         project_dir: Path,
         goals_path: Path | None = None,
+        *,
+        session_focus: str | None = None,
     ) -> "AppConfig":
         project_dir = project_dir.resolve()
         project_dir.mkdir(parents=True, exist_ok=True)
@@ -256,6 +290,7 @@ class AppConfig:
             budgets=load_budgets(project_dir),
             goals=load_goals(project_dir, goals_path),
             danger=load_dangerous_paths(project_dir),
+            session_focus=session_focus,
         )
 
 

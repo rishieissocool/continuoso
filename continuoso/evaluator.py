@@ -80,12 +80,12 @@ class Evaluator:
         # 4. Lint (soft: used in score, not a hard gate unless very bad).
         r.lint_ok, r.lint_summary = self._run_ruff(workdir)
 
-        # Score components (0..1 each), weighted.
+        # Score components (0..1 each), weighted — tests are the primary bar.
         s_tests = 1.0 if r.tests_ok else 0.0
         s_inv   = 1.0 if r.invariants_ok else 0.0
         s_size  = 1.0 if r.size_ok else 0.0
         s_lint  = 1.0 if r.lint_ok else 0.5
-        r.score = 0.45*s_tests + 0.25*s_inv + 0.15*s_size + 0.15*s_lint
+        r.score = 0.55*s_tests + 0.22*s_inv + 0.13*s_size + 0.10*s_lint
 
         # Gate.
         r.passed = r.tests_ok and r.invariants_ok and r.size_ok

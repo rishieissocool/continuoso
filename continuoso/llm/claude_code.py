@@ -12,6 +12,7 @@ Resolution order (especially important on Windows):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -19,6 +20,8 @@ import time
 from pathlib import Path
 
 from .base import LLMClient, LLMError, LLMResponse
+
+log = logging.getLogger(__name__)
 
 
 def resolve_claude_executable(hint: str = "claude") -> str | None:
@@ -29,6 +32,12 @@ def resolve_claude_executable(hint: str = "claude") -> str | None:
         p = Path(hint)
         if p.is_file():
             return str(p.resolve())
+        # e.g. "claude" without extension on Windows
+        if os.name == "nt" and not p.suffix:
+            for ext in (".exe", ".cmd", ".bat"):
+                pe = p.with_suffix(ext)
+                if pe.is_file():
+                    return str(pe.resolve())
     except OSError:
         pass
 
@@ -111,11 +120,19 @@ class ClaudeCodeClient(LLMClient):
         prompt = f"{system}\n\n---\n\n{user}"
         cmd = self._argv(prompt, model)
 
+        cwd = workdir
+        if cwd:
+            log.info(
+                "claude_code: invoking CLI (cwd=%s, model=%s)",
+                cwd,
+                model,
+            )
+
         start = time.monotonic()
         try:
             proc = subprocess.run(
                 cmd,
-                cwd=workdir,
+                cwd=cwd,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,

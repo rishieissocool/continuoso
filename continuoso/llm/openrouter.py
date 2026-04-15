@@ -1,12 +1,16 @@
 """OpenRouter HTTP client. Single endpoint, many models."""
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 
 import requests
 
 from .base import LLMClient, LLMError, LLMResponse
+from .wait_heartbeat import wait_heartbeat
+
+log = logging.getLogger(__name__)
 
 # Approximate per-million-token prices (USD). Updated periodically.
 # Router uses these to pick the cheapest model within a tier.
@@ -85,16 +89,22 @@ class OpenRouterClient(LLMClient):
         cur_max = max_tokens
         data: dict[str, Any] | None = None
 
+        log.info(
+            "openrouter: POST chat/completions model=%s (waiting for response)…",
+            model,
+        )
+
         # Retries: 402 insufficient credits → halve max_tokens; 429/5xx → backoff.
         for attempt in range(12):
             payload["max_tokens"] = cur_max
             try:
-                r = self.session.post(
-                    url,
-                    headers=self._headers(),
-                    json=payload,
-                    timeout=self.timeout,
-                )
+                with wait_heartbeat(f"openrouter/{model}"):
+                    r = self.session.post(
+                        url,
+                        headers=self._headers(),
+                        json=payload,
+                        timeout=self.timeout,
+                    )
             except requests.RequestException as e:
                 last_exc = e
                 time.sleep(min(2 ** (attempt % 4), 16))

@@ -4,12 +4,16 @@ No API key; cost is tracked as $0. Pull the model first: `ollama pull qwen2.5:7b
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 
 import requests
 
 from .base import LLMClient, LLMError, LLMResponse
+from .wait_heartbeat import wait_heartbeat
+
+log = logging.getLogger(__name__)
 
 
 class OllamaClient(LLMClient):
@@ -52,14 +56,20 @@ class OllamaClient(LLMClient):
         last_exc: Exception | None = None
         data: dict[str, Any] | None = None
 
+        log.info(
+            "ollama: POST chat/completions model=%s (first reply can take minutes on CPU)…",
+            model,
+        )
+
         for attempt in range(4):
             try:
-                r = self.session.post(
-                    url,
-                    headers={"Content-Type": "application/json"},
-                    json=payload,
-                    timeout=self.timeout,
-                )
+                with wait_heartbeat(f"ollama/{model}"):
+                    r = self.session.post(
+                        url,
+                        headers={"Content-Type": "application/json"},
+                        json=payload,
+                        timeout=self.timeout,
+                    )
             except requests.RequestException as e:
                 last_exc = e
                 time.sleep(min(2 ** attempt, 8))

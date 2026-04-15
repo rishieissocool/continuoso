@@ -10,6 +10,7 @@ from pathlib import Path
 from .config import AppConfig
 from .evaluator import EvalReport, Evaluator
 from .executor import Executor
+from .feature_log import FeatureLog, new_session_id
 from .llm import ClaudeCodeClient, OllamaClient, OpenRouterClient
 from .memory import Memory
 from .observer import Observer, Snapshot
@@ -84,6 +85,34 @@ class Orchestrator:
         self.safeguards = Safeguards(self.memory)
         self.observer = Observer(cfg.project_dir)
         self.evaluator = Evaluator(cfg)
+        self.session_id = new_session_id()
+        self.feature_log = FeatureLog(
+            cfg.state_dir,
+            self.session_id,
+            session_focus=cfg.session_focus,
+        )
+        self.feature_log.start_session()
+        try:
+            _fl_rel = self.feature_log.session_md_path.relative_to(cfg.project_dir)
+        except ValueError:
+            _fl_rel = self.feature_log.session_md_path
+        log.info("feature log: session %s — %s", self.session_id, _fl_rel)
+        if cfg.session_focus:
+            log.info("session focus: %s", cfg.session_focus[:500])
+        log.info(
+            "runtime: pause %.1fs after each iteration; snapshot pytest=%s; max files=%d — "
+            "each iteration should improve the project; merges require green tests + invariants "
+            "(Ctrl+C stops safely)",
+            cfg.env.iteration_delay_sec,
+            cfg.env.snapshot_run_tests,
+            cfg.env.snapshot_max_files,
+        )
+        if cfg.env.verbose_llm:
+            log.info(
+                "verbose LLM trace ON — full raw model replies at INFO "
+                "(CONTINUOSO_VERBOSE_LLM_CHARS=%d)",
+                cfg.env.verbose_llm_chars,
+            )
 
     # ------------------------------------------------------------------
     def run_forever(self, max_iterations: int | None = None) -> None:
@@ -101,6 +130,13 @@ class Orchestrator:
                     "iteration %d: outcome=%s score=%.2f %s",
                     res.iteration_id, res.outcome, res.score, tail,
                 )
+                delay = self.cfg.env.iteration_delay_sec
+                if delay > 0:
+                    log.info(
+                        "sleeping %.1fs before next iteration (cool-down / UI responsiveness)",
+                        delay,
+                    )
+                    time.sleep(delay)
             except KeyboardInterrupt:
                 log.warning("interrupted by user — state is persisted, safe to resume")
                 return
@@ -125,6 +161,7 @@ class Orchestrator:
         snap = self.observer.snapshot(
             run_tests=self.cfg.env.snapshot_run_tests,
             pytest_timeout=self.cfg.env.pytest_timeout,
+            max_files=self.cfg.env.snapshot_max_files,
         )
         iteration_id = self.memory.start_iteration(goal="(planning)")
         planner = Planner(self.cfg, self.router, self.memory, iteration_id)
@@ -270,6 +307,12 @@ class Orchestrator:
             self.memory.finish_iteration(
                 iteration_id, outcome="merged", score=report.score,
                 chosen_gap_id=plan.chosen_gap_id,
+                notes=f"files={len(files_changed)} +{loc_add}/-{loc_rem}",
+            )
+            self.feature_log.append_merged(
+                iteration_id=iteration_id,
+                gap_id=plan.chosen_gap_id,
+                goal=plan.iteration_goal,
                 notes=f"files={len(files_changed)} +{loc_add}/-{loc_rem}",
             )
             return IterationResult(

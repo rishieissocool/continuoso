@@ -3,39 +3,33 @@
 
 product:
   name: "target-app"
-  # One or two sentences. The vision the loop optimizes toward.
   vision: >
-    A small command-line task manager with a local SQLite backend,
-    a REST API wrapper, and a minimal web UI. Must stay single-binary
-    deployable and fully covered by tests.
+    Continuously improve this codebase: keep tests green, raise quality
+    (correctness, clarity, maintainability), and polish UX and docs until
+    further gains are marginal. Each merged iteration should be objectively
+    better than the last.
 
-# Ordered; higher = more important. Planner uses these as strategic_weight.
+# Higher weight = more important when ranking gaps.
 priorities:
-  - id: core-cli
+  - id: tests-and-correctness
     weight: 1.0
-    description: "CLI commands: add, list, complete, delete tasks."
-  - id: persistence
-    weight: 0.9
-    description: "SQLite persistence with migrations."
-  - id: rest-api
-    weight: 0.7
-    description: "FastAPI wrapper around the core logic."
-  - id: web-ui
+    description: "All automated tests pass; fix regressions immediately; add tests for fragile or critical behavior."
+  - id: product-quality
+    weight: 0.85
+    description: "Features and UX match the product vision; remove rough edges and inconsistencies."
+  - id: structure-and-docs
+    weight: 0.65
+    description: "Clear structure, README, and in-code documentation where it prevents mistakes."
+  - id: performance-and-a11y
     weight: 0.5
-    description: "Minimal HTML/HTMX UI served from the API."
-  - id: observability
-    weight: 0.4
-    description: "Structured logging + basic metrics."
+    description: "Reasonable performance and accessibility for the stack (where applicable)."
 
-# The loop will not touch these unless a priority depends on it.
 non_goals:
-  - "Distributed systems / multi-node deploys"
-  - "Auth / multi-user (v1)"
+  - "Rewriting the stack without strong justification"
+  - "Large unrelated refactors in a single iteration"
 
 # Hard requirements. Evaluator treats these as invariants.
 invariants:
-  - "All public functions must have type hints."
-  - "Test coverage must not decrease between iterations."
   - "No change may break existing passing tests."
   - "No files may exceed 500 LOC."
 

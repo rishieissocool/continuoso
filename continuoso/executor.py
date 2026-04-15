@@ -17,12 +17,13 @@ from .config import AppConfig, DangerousPathsConfig
 from .llm.base import LLMError
 from .memory import Memory, SubtaskRecord
 from .planner import Subtask, _loads_robust
-from .prompts import EXECUTE_PROMPT, SYSTEM_BASE
+from .llm_trace import log_llm_trace
+from .prompts import EXECUTE_PROMPT, SYSTEM_BASE, format_session_focus
 from .router import Router, Selection
 
 log = logging.getLogger(__name__)
 
-MAX_FILE_BYTES = 40_000  # per file read into prompt
+MAX_FILE_BYTES = 28_000  # per file in execute prompt (token budget)
 
 
 @dataclass
@@ -88,6 +89,7 @@ class Executor:
     ) -> ChangeResult:
         contents = self._gather_files(workdir, subtask.files)
         prompt = EXECUTE_PROMPT.format(
+            session_focus=format_session_focus(self.cfg.session_focus),
             instruction=subtask.instruction,
             files=json.dumps(subtask.files),
             criteria="\n".join(f"- {c}" for c in subtask.acceptance_criteria),
@@ -108,6 +110,12 @@ class Executor:
         )
         self.router.record_usage(
             sel.tier, resp.input_tokens, resp.output_tokens, resp.cost_usd
+        )
+        log_llm_trace(
+            log,
+            self.cfg,
+            f"execute {subtask.id} ({subtask.task_class})",
+            resp.text,
         )
 
         try:
@@ -154,15 +162,15 @@ class Executor:
             except ValueError:
                 continue
             if not p.exists() or not p.is_file():
-                out.append(f"### {rel}\n(new file — does not yet exist)\n")
+                out.append(f"@{rel}\n<new file>\n")
                 continue
             try:
                 data = p.read_text(encoding="utf-8", errors="replace")[:MAX_FILE_BYTES]
             except OSError as e:
-                out.append(f"### {rel}\n(unreadable: {e})\n")
+                out.append(f"@{rel}\n<unreadable: {e}>\n")
                 continue
-            out.append(f"### {rel}\n```\n{data}\n```\n")
-        return "\n".join(out) if out else "(no files pre-existing)"
+            out.append(f"@{rel}\n{data}\n")
+        return "\n".join(out) if out else "(none)"
 
     def _apply(self, workdir: Path, changes: list[dict]) -> ChangeResult:
         r = ChangeResult()

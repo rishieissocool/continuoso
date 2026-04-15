@@ -2,18 +2,20 @@
 
 Point at any project folder:
     continuoso init  [PATH]   # scaffold .continuoso/goals.yaml (PATH defaults to cwd)
-    continuoso run   [PATH]
+    continuoso run   [PATH]     # optional session focus prompt or --focus / CONTINUOSO_SESSION_FOCUS
     continuoso status [PATH]
     continuoso rollback N [PATH]
 """
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 
 import click
 from rich.console import Console
+from rich.prompt import Prompt
 from rich.table import Table
 
 from .config import AppConfig, scaffold_project
@@ -37,6 +39,33 @@ def _path_arg() -> click.Argument:
 
 def _resolve_project(project: Path | None) -> Path:
     return (project or Path.cwd()).resolve()
+
+
+def _resolve_session_focus(
+    *,
+    focus: str | None,
+    no_prompt: bool,
+) -> str | None:
+    """CLI `--focus`, then `CONTINUOSO_SESSION_FOCUS`, then interactive prompt."""
+    if focus is not None:
+        s = focus.strip()
+        return s or None
+    env = (os.environ.get("CONTINUOSO_SESSION_FOCUS") or "").strip()
+    if env:
+        return env
+    if no_prompt:
+        return None
+    if not sys.stdin.isatty():
+        return None
+    console.print()
+    console.print(
+        "[bold]Session focus[/bold] (optional) — theme for this run, e.g. "
+        "[cyan]make the frontend better[/cyan] or "
+        "[cyan]improve responsive UX[/cyan]. "
+        "Enter = [dim]follow goals.yaml only[/dim]."
+    )
+    line = Prompt.ask("Focus", default="", show_default=False).strip()
+    return line or None
 
 
 @click.group()
@@ -65,15 +94,33 @@ def init(project: Path | None) -> None:
               help="Override goals.yaml path.")
 @click.option("--max-iterations", type=int, default=None, help="Stop after N iterations.")
 @click.option("--once", is_flag=True, help="Run exactly one iteration and exit.")
+@click.option(
+    "--focus",
+    "cli_focus",
+    default=None,
+    type=str,
+    help="Session theme (skips prompt). Overrides CONTINUOSO_SESSION_FOCUS.",
+)
+@click.option(
+    "--no-session-prompt",
+    is_flag=True,
+    help="Do not ask for session focus (use env or none).",
+)
 def run(
     project: Path | None,
     goals_path: Path | None,
     max_iterations: int | None,
     once: bool,
+    cli_focus: str | None,
+    no_session_prompt: bool,
 ) -> None:
     """Start the continuous loop on PROJECT (defaults to cwd)."""
     project = _resolve_project(project)
-    cfg = AppConfig.load(project, goals_path)
+    session_focus = _resolve_session_focus(
+        focus=cli_focus,
+        no_prompt=no_session_prompt,
+    )
+    cfg = AppConfig.load(project, goals_path, session_focus=session_focus)
     setup_logging(cfg.env.log_level)
 
     if not cfg.env.openrouter_api_key:
@@ -84,7 +131,14 @@ def run(
         )
 
     console.rule(f"[bold cyan]continuoso[/bold cyan] project={project}")
+    if cfg.session_focus:
+        console.print(f"[dim]session focus:[/dim] {cfg.session_focus}")
     orch = Orchestrator(cfg)
+    try:
+        _fl = orch.feature_log.session_md_path.relative_to(project)
+    except ValueError:
+        _fl = orch.feature_log.session_md_path
+    console.print(f"[dim]feature log session:[/dim] [cyan]{orch.session_id}[/cyan] → {_fl}")
     if once:
         res = orch.run_iteration()
         console.print(f"outcome: [bold]{res.outcome}[/bold]  score={res.score:.2f}")

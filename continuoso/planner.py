@@ -17,7 +17,15 @@ from .config import AppConfig
 from .llm.base import LLMClient, LLMError
 from .memory import Memory
 from .observer import Snapshot
-from .prompts import PLAN_PROMPT, REFLECT_PROMPT, SYSTEM_BASE
+from .llm_trace import log_llm_trace
+from .json_compact import dumps_llm
+from .prompts import (
+    PLAN_PROMPT,
+    REFLECT_PROMPT,
+    SYSTEM_BASE,
+    TASK_CLASSES,
+    format_session_focus,
+)
 from .router import Router, Selection
 
 log = logging.getLogger(__name__)
@@ -56,7 +64,9 @@ class Planner:
 
     def reflect(self, snapshot: Snapshot) -> list[dict]:
         prompt = REFLECT_PROMPT.format(
-            goals=json.dumps(self.cfg.goals.raw, indent=2),
+            task_classes=TASK_CLASSES,
+            session_focus=format_session_focus(self.cfg.session_focus),
+            goals=dumps_llm(self.cfg.goals.raw),
             state=snapshot.to_json(),
         )
         t0 = time.monotonic()
@@ -68,6 +78,7 @@ class Planner:
             sel.provider, sel.model, wall_ms,
             resp.input_tokens, resp.output_tokens,
         )
+        log_llm_trace(log, self.cfg, "reflect_gaps", resp.text)
         log.debug("reflect_gaps: raw model text (first 2k):\n%s", resp.text[:2000])
         data = _loads_robust(resp.text)
         gaps = data.get("gaps", []) if isinstance(data, dict) else []
@@ -81,7 +92,8 @@ class Planner:
 
     def plan(self, snapshot: Snapshot, gaps: list[dict]) -> Plan:
         prompt = PLAN_PROMPT.format(
-            gaps=json.dumps(gaps[:10], indent=2),
+            session_focus=format_session_focus(self.cfg.session_focus),
+            gaps=dumps_llm(gaps[:10]),
             state=snapshot.to_json(),
             max_loc=self.cfg.budgets.max_loc_changed,
             max_files=self.cfg.budgets.max_files_changed,
@@ -95,6 +107,7 @@ class Planner:
             sel.provider, sel.model, wall_ms,
             resp.input_tokens, resp.output_tokens,
         )
+        log_llm_trace(log, self.cfg, "plan_iteration", resp.text)
         log.debug("plan_iteration: raw model text (first 2k):\n%s", resp.text[:2000])
         data = _loads_robust(resp.text)
         if not isinstance(data, dict) or "subtasks" not in data:
@@ -140,7 +153,12 @@ class Planner:
                 task_class, sel.provider, sel.model, sel.tier,
             )
             try:
-                resp = _call(sel, prompt, json_mode=True)
+                resp = _call(
+                    sel,
+                    prompt,
+                    json_mode=True,
+                    workdir=str(self.cfg.project_dir),
+                )
                 return resp, sel
             except (LLMError, KeyError, IndexError, TypeError) as e:
                 log.warning(
@@ -155,6 +173,9 @@ class Planner:
             p["id"]: float(p.get("weight", 0.5))
             for p in self.cfg.goals.priorities
         }
+        focus = (self.cfg.session_focus or "").strip().lower()
+        focus_tokens = {t for t in focus.replace(",", " ").split() if len(t) > 2} if focus else set()
+
         scored: list[tuple[float, dict]] = []
         for g in gaps:
             pid = g.get("priority_id", "")
@@ -162,6 +183,10 @@ class Planner:
             est_loc = max(10, int(g.get("est_loc", 50)))
             feas = 1.0 / (1 + est_loc / 100)
             score = w * feas
+            if focus_tokens:
+                blob = f"{g.get('title', '')} {g.get('rationale', '')}".lower()
+                hits = sum(1 for t in focus_tokens if t in blob)
+                score *= 1.0 + min(0.12, hits * 0.04)
             g["_weight"] = w
             g["_score"] = score
             scored.append((score, g))
@@ -190,7 +215,13 @@ class Planner:
 
 
 # ---------- Helpers ----------
-def _call(sel: Selection, user: str, *, json_mode: bool):
+def _call(
+    sel: Selection,
+    user: str,
+    *,
+    json_mode: bool,
+    workdir: str | None = None,
+):
     return sel.client.complete(
         system=SYSTEM_BASE,
         user=user,
@@ -198,6 +229,7 @@ def _call(sel: Selection, user: str, *, json_mode: bool):
         max_tokens=4096,
         temperature=0.2,
         json_mode=json_mode,
+        workdir=workdir,
     )
 
 

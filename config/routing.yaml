@@ -1,5 +1,9 @@
 # Model routing. Each tier lists models in preferred order.
-# Default tier is `local` (Ollama). Override in .continuoso/routing.yaml per project.
+# `tier_order` controls walk order when a task fails over: Claude Code CLI first
+# (uses your local `claude` install + Claude Code usage), then OpenRouter, then Ollama.
+# Override per project in `.continuoso/routing.yaml`.
+
+tier_order: [heavy, free, cheap, local]
 
 success_threshold: 0.8
 # How many models to try per subtask (iter_selections stops after this many).
@@ -67,19 +71,19 @@ tiers:
         - id: "meta-llama/llama-3.3-70b-instruct:free"
           context: 66000
 
-# Default tier per task — `local` first; router walks toward free/cheap/heavy on failure.
+# Default tier per task — `heavy` tries Claude Code CLI first, then falls through tiers.
 task_class_defaults:
-  observe_summary: local
-  reflect_gaps: local
-  plan_iteration: local
-  decompose_task: local
-  edit_single_file: local
-  edit_cross_file: local
-  author_tests: local
-  fix_failing_tests: local
-  refactor: local
-  generate_docs: local
-  commit_message: local
-  lint_fix: local
-  dependency_bump: local
-  security_review: local
+  observe_summary: heavy
+  reflect_gaps: heavy
+  plan_iteration: heavy
+  decompose_task: heavy
+  edit_single_file: heavy
+  edit_cross_file: heavy
+  author_tests: heavy
+  fix_failing_tests: heavy
+  refactor: heavy
+  generate_docs: heavy
+  commit_message: heavy
+  lint_fix: heavy
+  dependency_bump: heavy
+  security_review: heavy

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -19,6 +18,7 @@ from .memory import Memory
 from .observer import Snapshot
 from .llm_trace import log_llm_trace
 from .json_compact import dumps_llm
+from .json_parse import parse_llm_json
 from .prompts import (
     PLAN_PROMPT,
     REFLECT_PROMPT,
@@ -233,26 +233,6 @@ def _call(
     )
 
 
-_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
-
-
 def _loads_robust(text: str) -> Any:
     """Tolerate models that wrap JSON in prose or code fences."""
-    text = text.strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    # Strip triple-backtick fences.
-    fenced = re.sub(r"```(?:json)?\s*|\s*```", "", text, flags=re.MULTILINE)
-    try:
-        return json.loads(fenced)
-    except json.JSONDecodeError:
-        pass
-    m = _JSON_RE.search(text)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except json.JSONDecodeError:
-            pass
-    raise LLMError(f"could not parse JSON from model output: {text[:300]}")
+    return parse_llm_json(text, context="model")

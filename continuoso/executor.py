@@ -16,9 +16,10 @@ from pathlib import Path
 from .config import AppConfig, DangerousPathsConfig
 from .llm.base import LLMError
 from .memory import Memory, SubtaskRecord
-from .planner import Subtask, _loads_robust
+from .json_parse import parse_llm_json
+from .planner import Subtask
 from .llm_trace import log_llm_trace
-from .prompts import EXECUTE_PROMPT, SYSTEM_BASE, format_session_focus
+from .prompts import EXECUTE_PROMPT, SYSTEM_EXECUTE, format_session_focus
 from .router import Router, Selection
 
 log = logging.getLogger(__name__)
@@ -100,7 +101,7 @@ class Executor:
             subtask.id, sel.provider, sel.model, sel.tier,
         )
         resp = sel.client.complete(
-            system=SYSTEM_BASE,
+            system=SYSTEM_EXECUTE,
             user=prompt,
             model=sel.model,
             max_tokens=4096,
@@ -119,7 +120,7 @@ class Executor:
         )
 
         try:
-            patch = _loads_robust(resp.text)
+            patch = parse_llm_json(resp.text, context="execute")
         except LLMError as e:
             self._record(subtask, sel, attempt, success=False, error=str(e))
             return ChangeResult(success=False, error=str(e))

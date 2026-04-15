@@ -106,6 +106,13 @@ def init(project: Path | None) -> None:
     is_flag=True,
     help="Do not ask for session focus (use env or none).",
 )
+@click.option(
+    "--parallel",
+    type=int,
+    default=None,
+    metavar="N",
+    help="Parallel workers for file-disjoint subtasks (sets CONTINUOSO_PARALLEL_WORKERS).",
+)
 def run(
     project: Path | None,
     goals_path: Path | None,
@@ -113,9 +120,12 @@ def run(
     once: bool,
     cli_focus: str | None,
     no_session_prompt: bool,
+    parallel: int | None,
 ) -> None:
     """Start the continuous loop on PROJECT (defaults to cwd)."""
     project = _resolve_project(project)
+    if parallel is not None:
+        os.environ["CONTINUOSO_PARALLEL_WORKERS"] = str(max(1, parallel))
     session_focus = _resolve_session_focus(
         focus=cli_focus,
         no_prompt=no_session_prompt,

@@ -3,10 +3,15 @@
 Each iteration works inside its own worktree off the target repo. Successful
 iterations are squash-merged back to main; failed iterations are discarded
 by removing the worktree.
+
+Parallel subtasks use multiple worktrees from the same snapshot; branches are
+merged in order with ``git merge main`` into each worktree before squash-merge
+to reduce conflicts when file sets are disjoint.
 """
 from __future__ import annotations
 
 import logging
+import secrets
 import shutil
 import subprocess
 import time
@@ -19,6 +24,10 @@ log = logging.getLogger(__name__)
 
 class GitError(RuntimeError):
     pass
+
+
+class MergeConflictError(GitError):
+    """Raised when merging main into a worktree or squash-merge hits conflicts."""
 
 
 def _run(cmd: list[str], cwd: Path, *, check: bool = True) -> subprocess.CompletedProcess:
@@ -62,23 +71,41 @@ def _snapshot_untracked(workspace: Path) -> None:
         _run(["git", "commit", "-m", "chore: snapshot workspace state"], workspace)
 
 
-@contextmanager
-def worktree(workspace: Path, iteration_id: int) -> Iterator[Path]:
-    """Yield a Path to an ephemeral worktree. Caller decides merge/discard."""
+def prepare_workspace_for_worktrees(workspace: Path) -> None:
+    """Commit dirty tree once before creating one or more worktrees."""
     ensure_repo(workspace)
     _snapshot_untracked(workspace)
+
+
+def create_worktree_at_slot(workspace: Path, iteration_id: int, slot: int) -> Path:
+    """Create a new worktree branch from current main. Caller must have run prepare first."""
     wt_root = workspace / ".continuoso" / "worktrees"
     wt_root.mkdir(parents=True, exist_ok=True)
-    branch = f"cont/iter-{iteration_id}-{int(time.time())}"
-    wt_path = wt_root / branch.replace("/", "_")
-
+    branch = f"cont/iter-{iteration_id}-s{slot}-{secrets.token_hex(4)}"
+    safe = branch.replace("/", "_")
+    wt_path = wt_root / safe
     _run(["git", "worktree", "add", "-b", branch, str(wt_path), "main"], workspace)
+    return wt_path
+
+
+@contextmanager
+def worktree(workspace: Path, iteration_id: int, slot: int = 0) -> Iterator[Path]:
+    """Yield a Path to an ephemeral worktree. Caller decides merge/discard."""
+    prepare_workspace_for_worktrees(workspace)
+    wt_path = create_worktree_at_slot(workspace, iteration_id, slot)
     try:
         yield wt_path
     finally:
-        # Worktree removal is handled by merge() / discard(); here we just
-        # make sure nothing leaks if caller forgot.
         pass
+
+
+def merge_main_into_wt(wt: Path, workspace: Path) -> None:
+    """Update worktree branch with latest main (call before squash-merge when main moved)."""
+    r = _run(["git", "merge", "main"], wt, check=False)
+    if r.returncode != 0:
+        raise MergeConflictError(
+            f"git merge main in worktree failed (conflict?): {r.stderr[:800] or r.stdout[:800]}"
+        )
 
 
 def commit_all(wt: Path, message: str) -> str | None:
@@ -92,14 +119,26 @@ def commit_all(wt: Path, message: str) -> str | None:
     return sha
 
 
-def merge_worktree(workspace: Path, wt: Path, iteration_id: int, message: str) -> None:
+def merge_worktree(
+    workspace: Path,
+    wt: Path,
+    iteration_id: int,
+    message: str,
+    *,
+    tag_suffix: str = "",
+) -> None:
     """Squash-merge worktree branch into main, then remove the worktree."""
     branch = _branch_of(wt)
     _run(["git", "checkout", "main"], workspace)
-    _run(["git", "merge", "--squash", branch], workspace)
+    r = _run(["git", "merge", "--squash", branch], workspace, check=False)
+    if r.returncode != 0:
+        raise MergeConflictError(
+            f"squash merge failed: {r.stderr[:800] or r.stdout[:800]}"
+        )
     _run(["git", "commit", "-m", message], workspace)
     sha = _run(["git", "rev-parse", "HEAD"], workspace).stdout.strip()
-    _run(["git", "tag", f"iter-{iteration_id}", sha], workspace)
+    tag = f"iter-{iteration_id}{tag_suffix}"
+    _run(["git", "tag", tag, sha], workspace)
     _remove_worktree(workspace, wt, branch)
 
 
@@ -111,6 +150,21 @@ def discard_worktree(workspace: Path, wt: Path) -> None:
 def diff_stat(wt: Path) -> str:
     r = _run(["git", "diff", "main...HEAD", "--stat"], wt, check=False)
     return r.stdout.strip()
+
+
+def tag_head(workspace: Path, name: str) -> None:
+    """Annotate current main HEAD (for rollback)."""
+    _run(["git", "tag", name, "HEAD"], workspace)
+
+
+def reset_main_to_tag(workspace: Path, tag: str) -> None:
+    """Hard reset main to the given tag (parallel rollback)."""
+    _run(["git", "checkout", "main"], workspace)
+    _run(["git", "reset", "--hard", tag], workspace)
+
+
+def delete_tag(workspace: Path, tag: str) -> None:
+    _run(["git", "tag", "-d", tag], workspace, check=False)
 
 
 def rollback_last_iteration(workspace: Path, iteration_id: int) -> None:

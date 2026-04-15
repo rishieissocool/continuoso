@@ -4,25 +4,35 @@ from __future__ import annotations
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
 from .config import AppConfig
 from .evaluator import EvalReport, Evaluator
-from .executor import Executor
+from .executor import ChangeResult, Executor
 from .feature_log import FeatureLog, new_session_id
 from .llm import ClaudeCodeClient, OllamaClient, OpenRouterClient
 from .memory import Memory
 from .observer import Observer, Snapshot
+from .parallel_exec import partition_into_waves
 from .planner import Plan, Planner, Subtask
 from .router import Router
 from .safeguards import Safeguards
 from .sandbox import (
+    GitError,
+    MergeConflictError,
     commit_all,
-    discard_worktree,
+    create_worktree_at_slot,
+    delete_tag,
     diff_stat,
+    discard_worktree,
     ensure_repo,
+    merge_main_into_wt,
     merge_worktree,
+    prepare_workspace_for_worktrees,
+    reset_main_to_tag,
+    tag_head,
     worktree,
 )
 
@@ -100,12 +110,13 @@ class Orchestrator:
         if cfg.session_focus:
             log.info("session focus: %s", cfg.session_focus[:500])
         log.info(
-            "runtime: pause %.1fs after each iteration; snapshot pytest=%s; max files=%d — "
-            "each iteration should improve the project; merges require green tests + invariants "
-            "(Ctrl+C stops safely)",
+            "runtime: pause %.1fs after each iteration; snapshot pytest=%s; max files=%d; "
+            "parallel_workers=%d (file-disjoint subtasks); "
+            "merges require green tests + invariants (Ctrl+C stops safely)",
             cfg.env.iteration_delay_sec,
             cfg.env.snapshot_run_tests,
             cfg.env.snapshot_max_files,
+            cfg.env.parallel_workers,
         )
         if cfg.env.verbose_llm:
             log.info(
@@ -204,6 +215,190 @@ class Orchestrator:
         return self._execute_plan(iteration_id, plan, snap)
 
     # ------------------------------------------------------------------
+    def _execute_plan_parallel(
+        self,
+        iteration_id: int,
+        plan: Plan,
+        start: float,
+        wall_cap: float,
+        waves: list[list[Subtask]],
+        pw: int,
+    ) -> IterationResult:
+        """Run file-disjoint subtasks in parallel worktrees; merge in order; conflicts roll back."""
+        workspace = self.cfg.project_dir
+        safety = f"continuoso-preiter-{iteration_id}"
+        tag_head(workspace, safety)
+        log.info(
+            "parallel subtasks: workers=%d waves=%s",
+            pw,
+            [len(w) for w in waves],
+        )
+
+        slot = 0
+        merge_idx = 0
+        all_files: set[str] = set()
+        loc_add = loc_rem = 0
+        pending: set[Path] = set()
+
+        def cleanup_wts() -> None:
+            for wt in list(pending):
+                if wt.exists():
+                    try:
+                        discard_worktree(workspace, wt)
+                    except Exception:
+                        log.debug("discard %s", wt, exc_info=True)
+                pending.discard(wt)
+
+        try:
+
+            def run_one(pair: tuple[Path, Subtask]) -> tuple[Path, Subtask, ChangeResult]:
+                wt, st = pair
+                ex = Executor(self.cfg, self.router, self.memory, iteration_id)
+                return wt, st, ex.run_subtask(wt, st)
+
+            for wave in waves:
+                if time.monotonic() - start > wall_cap:
+                    raise RuntimeError("wall-clock cap hit")
+
+                prepare_workspace_for_worktrees(workspace)
+                batch: list[tuple[Path, Subtask]] = []
+                for st in wave:
+                    if self.safeguards.is_quarantined(st.id, "", st.files):
+                        log.info("subtask %s quarantined; skipping", st.id)
+                        continue
+                    wt = create_worktree_at_slot(workspace, iteration_id, slot)
+                    slot += 1
+                    batch.append((wt, st))
+                    pending.add(wt)
+
+                if not batch:
+                    continue
+
+                max_t = min(pw, len(batch))
+                with ThreadPoolExecutor(max_workers=max_t) as pool:
+                    results = list(pool.map(run_one, batch))
+
+                for wt, st, res in results:
+                    if not res.success:
+                        self.safeguards.observe_failure(
+                            subtask_slug=st.id,
+                            error=res.error,
+                            files=st.files,
+                        )
+                        raise RuntimeError(
+                            f"subtask {st.id} failed: {res.error[:300]}"
+                        )
+
+                ordered = sorted(results, key=lambda x: x[1].id)
+                for wt, st, res in ordered:
+                    if time.monotonic() - start > wall_cap:
+                        raise RuntimeError("wall-clock cap hit")
+                    all_files.update(res.files_changed)
+                    loc_add += res.loc_added
+                    loc_rem += res.loc_removed
+                    if merge_idx > 0:
+                        merge_main_into_wt(wt, workspace)
+                    msg = (
+                        f"feat({plan.chosen_gap_id}): {plan.iteration_goal[:50]} "
+                        f"[{st.id}]"
+                    )
+                    merge_worktree(
+                        workspace,
+                        wt,
+                        iteration_id,
+                        f"{msg}\n\niter={iteration_id} parallel p{merge_idx}\n",
+                        tag_suffix=f"-p{merge_idx}",
+                    )
+                    merge_idx += 1
+                    pending.discard(wt)
+
+            if not all_files:
+                raise RuntimeError("no changes (all subtasks skipped or empty)")
+
+            report = self.evaluator.evaluate(
+                workspace,
+                files_changed=sorted(all_files),
+                loc_added=loc_add,
+                loc_removed=loc_rem,
+            )
+
+            if not report.passed:
+                log.warning(
+                    "evaluator rejected parallel iter %d: %s",
+                    iteration_id,
+                    report.reason[:300],
+                )
+                reset_main_to_tag(workspace, safety)
+                delete_tag(workspace, safety)
+                cleanup_wts()
+                self.memory.finish_iteration(
+                    iteration_id,
+                    outcome="rolled_back",
+                    score=report.score,
+                    chosen_gap_id=plan.chosen_gap_id,
+                    notes=json.dumps(report.to_dict())[:2000],
+                )
+                self.safeguards.observe_failure(
+                    subtask_slug=plan.chosen_gap_id or "unknown",
+                    error=report.reason,
+                    files=sorted(all_files),
+                )
+                return IterationResult(
+                    iteration_id,
+                    "rolled_back",
+                    report.score,
+                    plan.iteration_goal,
+                    report.reason,
+                )
+
+            delete_tag(workspace, safety)
+            self.memory.finish_iteration(
+                iteration_id,
+                outcome="merged",
+                score=report.score,
+                chosen_gap_id=plan.chosen_gap_id,
+                notes=(
+                    f"parallel files={len(all_files)} +{loc_add}/-{loc_rem}"
+                ),
+            )
+            self.feature_log.append_merged(
+                iteration_id=iteration_id,
+                gap_id=plan.chosen_gap_id,
+                goal=plan.iteration_goal,
+                notes=f"parallel files={len(all_files)} +{loc_add}/-{loc_rem}",
+            )
+            return IterationResult(
+                iteration_id,
+                "merged",
+                report.score,
+                plan.iteration_goal,
+                f"parallel files={len(all_files)} +{loc_add}/-{loc_rem}",
+            )
+
+        except (MergeConflictError, RuntimeError, GitError, OSError) as e:
+            log.warning("parallel execution failed: %s", e)
+            try:
+                reset_main_to_tag(workspace, safety)
+            except Exception:
+                log.exception("parallel rollback")
+            delete_tag(workspace, safety)
+            cleanup_wts()
+            self.memory.finish_iteration(
+                iteration_id,
+                outcome="aborted",
+                score=0.0,
+                chosen_gap_id=plan.chosen_gap_id,
+                notes=f"parallel: {e}"[:2000],
+            )
+            return IterationResult(
+                iteration_id,
+                "aborted",
+                0.0,
+                plan.iteration_goal,
+                str(e)[:500],
+            )
+
+    # ------------------------------------------------------------------
     def _execute_plan(
         self,
         iteration_id: int,
@@ -212,6 +407,18 @@ class Orchestrator:
     ) -> IterationResult:
         start = time.monotonic()
         wall_cap = self.cfg.budgets.max_wall_seconds
+
+        waves = partition_into_waves(plan.subtasks)
+        pw = self.cfg.env.parallel_workers
+        if (
+            pw > 1
+            and len(plan.subtasks) > 1
+            and waves
+            and max(len(w) for w in waves) > 1
+        ):
+            return self._execute_plan_parallel(
+                iteration_id, plan, start, wall_cap, waves, pw
+            )
 
         with worktree(self.cfg.project_dir, iteration_id) as wt:
             executor = Executor(self.cfg, self.router, self.memory, iteration_id)

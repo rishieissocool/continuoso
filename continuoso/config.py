@@ -10,6 +10,7 @@ Each project keeps its own state in `<project>/.continuoso/`:
   logs/features.md     append-only list of merged features (all sessions)
   logs/sessions/       one markdown file per `continuoso run` with that session's features
   Session focus        optional theme for a run (CLI prompt, --focus, or CONTINUOSO_SESSION_FOCUS)
+  Parallel subtasks    CONTINUOSO_PARALLEL_WORKERS / --parallel — disjoint file sets run in parallel
 
 Run `continuoso run /path/to/project` from anywhere.
 """
@@ -113,6 +114,7 @@ class EnvConfig:
     snapshot_max_files: int
     verbose_llm: bool
     verbose_llm_chars: int
+    parallel_workers: int
 
 
 def load_env() -> EnvConfig:
@@ -151,6 +153,10 @@ def load_env() -> EnvConfig:
         in ("1", "true", "yes", "on"),
         verbose_llm_chars=int(
             os.environ.get("CONTINUOSO_VERBOSE_LLM_CHARS", "8000")
+        ),
+        parallel_workers=max(
+            1,
+            int(os.environ.get("CONTINUOSO_PARALLEL_WORKERS", "1")),
         ),
     )
 

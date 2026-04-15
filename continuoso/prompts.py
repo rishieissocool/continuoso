@@ -9,6 +9,14 @@ SYSTEM_BASE = (
     "Return only JSON when the user prompt asks for JSON."
 )
 
+# Stricter system for file patches — models must not ask for permission or chat.
+SYSTEM_EXECUTE = (
+    "continuoso execute (non-interactive): you have full read/write access to every path "
+    "listed under the project worktree. Do not ask for permission, confirmation, or "
+    "elevated access — apply the subtask and respond with one JSON object only "
+    "(schema in user message). No markdown fences, no preamble, no prose after the JSON."
+)
+
 # Passed into REFLECT_PROMPT.format(task_classes=...)
 TASK_CLASSES = (
     "edit_single_file,edit_cross_file,author_tests,fix_failing_tests,"
@@ -47,7 +55,7 @@ Align iteration_goal and subtasks with focus when tests allow.
 Gaps:{gaps}
 State:{state}"""
 
-EXECUTE_PROMPT = """One subtask; minimal diff; keep tests green.
+EXECUTE_PROMPT = """Subtask (minimal diff; keep tests green). Writable files are under the repo root below.
 
 Session focus:{session_focus}
 
@@ -56,7 +64,8 @@ Files:{files}
 Criteria:{criteria}
 {file_contents}
 
-JSON: {{"changes":[{{"path":"","action":"create|modify|delete","content":""}}],"notes":""}}"""
+Reply with one JSON object only (no other text):
+{{"changes":[{{"path":"relative/path.css","action":"modify","content":"full file"}}],"notes":"feat: short summary"}}"""
 
 COMMIT_MSG_PROMPT = """Conventional commit ≤72 chars (feat:/fix:/test:/chore: lowercase):
 

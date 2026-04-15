@@ -1,6 +1,7 @@
 """Claude Code CLI wrapper.
 
 Invokes the `claude` binary in non-interactive mode (`-p`) with JSON output,
+`--dangerously-skip-permissions` (so file edits are not blocked on approval prompts),
 run inside a specified working directory. Uses the user's existing Claude Code
 auth, so no API key is needed here.
 
@@ -22,6 +23,40 @@ from pathlib import Path
 from .base import LLMClient, LLMError, LLMResponse
 
 log = logging.getLogger(__name__)
+
+
+def _try_parse_json_stdout(raw: str) -> dict | None:
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        o = json.loads(raw)
+        return o if isinstance(o, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
+def _claude_envelope_is_failure(env: dict) -> str | None:
+    """If this JSON envelope is an error/quota/limit, return a user-facing message."""
+    result = str(env.get("result") or env.get("content") or env.get("text") or "").strip()
+    if env.get("is_error"):
+        return result or "Claude Code returned is_error (no message)"
+    if env.get("subtype") == "error":
+        return result or "Claude Code error"
+    low = result.lower()
+    if result and any(
+        p in low
+        for p in (
+            "hit your limit",
+            "you've hit your limit",
+            "rate limit",
+            "usage limit",
+            "quota exceeded",
+            "billing required",
+        )
+    ):
+        return result
+    return None
 
 
 def resolve_claude_executable(hint: str = "claude") -> str | None:
@@ -94,6 +129,7 @@ class ClaudeCodeClient(LLMClient):
             "json",
             "--model",
             model,
+            "--dangerously-skip-permissions",
         ]
         if not self.bin:
             raise LLMError("Claude Code CLI not found on PATH")
@@ -146,33 +182,39 @@ class ClaudeCodeClient(LLMClient):
 
         latency_ms = int((time.monotonic() - start) * 1000)
 
+        raw = proc.stdout.strip()
+        combined_err = (proc.stderr or "").strip() or raw[:800]
+
+        # Exit 1 often still prints a JSON envelope to stdout (quota, limit, is_error, …).
+        env = _try_parse_json_stdout(raw)
+        if isinstance(env, dict):
+            fail_msg = _claude_envelope_is_failure(env)
+            if fail_msg:
+                log.warning(
+                    "claude_code: CLI failure/quota — trying next model (%s)",
+                    fail_msg[:200],
+                )
+                raise LLMError(f"Claude Code: {fail_msg}")
+
         if proc.returncode != 0:
             raise LLMError(
-                f"Claude CLI exit {proc.returncode}: {proc.stderr[:500] or proc.stdout[:500]}"
+                f"Claude CLI exit {proc.returncode}: {combined_err[:600]}"
             )
 
-        # --output-format json returns a JSON envelope with the assistant text
-        # in a `result` or `content` field depending on version.
-        raw = proc.stdout.strip()
         text = raw
         in_tok = out_tok = 0
         cost = 0.0
-        try:
-            env = json.loads(raw)
-            if isinstance(env, dict):
-                text = (
-                    env.get("result")
-                    or env.get("content")
-                    or env.get("text")
-                    or raw
-                )
-                usage = env.get("usage") or {}
-                in_tok = int(usage.get("input_tokens", 0))
-                out_tok = int(usage.get("output_tokens", 0))
-                cost = float(env.get("total_cost_usd", 0.0))
-        except json.JSONDecodeError:
-            # Older CLI versions stream plain text; use it directly.
-            text = raw
+        if isinstance(env, dict):
+            text = (
+                env.get("result")
+                or env.get("content")
+                or env.get("text")
+                or raw
+            )
+            usage = env.get("usage") or {}
+            in_tok = int(usage.get("input_tokens", 0))
+            out_tok = int(usage.get("output_tokens", 0))
+            cost = float(env.get("total_cost_usd", 0.0))
 
         return LLMResponse(
             text=text,

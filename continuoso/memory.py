@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -123,7 +124,10 @@ class Memory:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path), isolation_level=None)
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(
+            str(db_path), isolation_level=None, check_same_thread=False
+        )
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
 
@@ -142,11 +146,12 @@ class Memory:
 
     # ---- Iterations ----
     def start_iteration(self, goal: str) -> int:
-        cur = self._conn.execute(
-            "INSERT INTO iterations (started_at, goal) VALUES (?, ?)",
-            (time.time(), goal),
-        )
-        return int(cur.lastrowid)
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO iterations (started_at, goal) VALUES (?, ?)",
+                (time.time(), goal),
+            )
+            return int(cur.lastrowid)
 
     def finish_iteration(
         self,
@@ -157,12 +162,13 @@ class Memory:
         chosen_gap_id: str | None,
         notes: str = "",
     ) -> None:
-        self._conn.execute(
-            """UPDATE iterations
-               SET finished_at=?, outcome=?, score=?, chosen_gap_id=?, notes=?
-               WHERE id=?""",
-            (time.time(), outcome, score, chosen_gap_id, notes, iteration_id),
-        )
+        with self._lock:
+            self._conn.execute(
+                """UPDATE iterations
+                   SET finished_at=?, outcome=?, score=?, chosen_gap_id=?, notes=?
+                   WHERE id=?""",
+                (time.time(), outcome, score, chosen_gap_id, notes, iteration_id),
+            )
 
     def last_iterations(self, n: int = 10) -> list[dict[str, Any]]:
         rows = self._conn.execute(
@@ -172,6 +178,10 @@ class Memory:
 
     # ---- Subtasks ----
     def record_subtask(self, r: SubtaskRecord) -> None:
+        with self._lock:
+            self._record_subtask_unlocked(r)
+
+    def _record_subtask_unlocked(self, r: SubtaskRecord) -> None:
         with self.tx() as c:
             c.execute(
                 """INSERT INTO subtasks
@@ -268,6 +278,12 @@ class Memory:
     # ---- Budget ----
     def add_usage(self, tier: str, tokens: int, cost_usd: float) -> None:
         day = time.strftime("%Y-%m-%d")
+        with self._lock:
+            self._add_usage_unlocked(day, tier, tokens, cost_usd)
+
+    def _add_usage_unlocked(
+        self, day: str, tier: str, tokens: int, cost_usd: float
+    ) -> None:
         with self.tx() as c:
             c.execute(
                 """INSERT INTO budget_usage (day, tier, tokens, cost_usd)
